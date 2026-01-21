@@ -32,6 +32,10 @@ source venv/bin/activate  # On macOS/Linux
 pip install esphome
 ```
 
+>之所以要在电脑终端上下载esphome，而不是在home assistant上运行，时因为pio生成的混村文件很大，HA实体承受不住，最终回失败
+>We found 1.63GB of unnecessary PlatformIO system data (temporary files, unnecessary packages, etc.).
+Use `pio system prune --dry-run` to list them or `pio system prune` to save disk space.
+
 ### 2. Download a configuration file
 
 Download the example configuration for your hardware:
