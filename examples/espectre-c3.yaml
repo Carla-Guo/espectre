@@ -18,8 +18,8 @@
 # - Via WiFi: Connect to "ESPectre Fallback" AP and configure
 
 esphome:
-  name: espectre
-  friendly_name: ESPectre
+  name: xiao-esp32c3
+  friendly_name: XIAO ESP32-C3 espectre
   min_version: 2025.11.0
   # Uncomment the next line if you have multiple ESPectre devices (adds MAC suffix to name)
   # name_add_mac_suffix: true
@@ -48,7 +48,7 @@ external_components:
 # Note: For Super Mini boards, keep traffic_generator_rate <= 94
 espectre:
   id: espectre_csi
-  traffic_generator_rate: 94  # Safe limit for C3 Super Mini boards
+  traffic_generator_rate: 80  # Safe limit for C3 Super Mini boards
 
 # Dashboard import for easy adoption
 dashboard_import:
