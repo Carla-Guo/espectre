@@ -13,9 +13,6 @@ cd test && pio test
 
 # Run specific suite
 pio test -f test_motion_detection
-
-# Run on ESP32-C6 device
-pio test -e esp32c6
 ```
 
 ---
@@ -24,14 +21,18 @@ pio test -e esp32c6
 
 | Suite | Type | Data | Focus |
 |-------|------|------|-------|
-| `test_csi_processor` | Unit | **Real** | API, getters, state machine, normalization, low-pass filter |
+| `test_mvs_detector` | Unit | **Real** | MVS algorithm, threshold, filters, state machine, lowpass |
+| `test_pca_detector` | Unit | **Real** | PCA algorithm, jitter/wander metrics |
+| `test_csi_manager` | Unit | Synthetic | CSIManager API, enable/disable, callbacks |
+| `test_utils` | Unit | **Real** | Variance, magnitude, turbulence, compare functions |
 | `test_hampel_filter` | Unit | **Real** | Outlier removal filter |
-| `test_calibration` | Unit | **Real** | NBVI, magnitude, turbulence, normalization scale, fallback |
-| `test_calibration_manager` | Integration | **Real** | CalibrationManager API, file I/O, NBVI ranking |
-| `test_csi_manager` | Integration | **Real** | CSIManager API, callbacks, motion detection |
+| `test_p95_calibrator` | Unit | **Real** | P95 band selection, magnitude, turbulence, adaptive threshold |
+| `test_nbvi_calibrator` | Unit | **Real** | NBVI subcarrier selection, configuration |
+| `test_pca_calibrator` | Unit | **Real** | PCA calibration, correlation threshold calculation |
 | `test_calibration_file_storage` | Unit | Synthetic | File-based magnitude storage |
 | `test_traffic_generator` | Unit | Synthetic | Error handling, rate limiting, adaptive backoff |
-| `test_motion_detection` | Integration | **Real** | MVS performance, NBVI end-to-end |
+| `test_serial_streamer` | Unit | Synthetic | Serial streaming API |
+| `test_motion_detection` | Integration | **Real** | MVS performance, P95 calibration end-to-end |
 
 
 ### Target Metrics (Motion Detection)
@@ -42,9 +43,18 @@ pio test -e esp32c6
 
 ## Real CSI Data
 
-The `data/` folder contains **2000 real CSI packets**:
-- 1000 baseline (empty room)
-- 1000 movement (person walking)
+Tests load real CSI data from NPZ files in `micro-espectre/data/` using the [cnpy](https://github.com/rogersce/cnpy) library.
+
+### Datasets
+
+| Chip | Baseline | Movement | Packets |
+|------|----------|----------|---------|
+| ESP32-C6 | `baseline_c6_64sc_*.npz` | `movement_c6_64sc_*.npz` | 1000 each |
+| ESP32-S3 | `baseline_s3_64sc_*.npz` | `movement_s3_64sc_*.npz` | 1000 each |
+
+Tests run with **multiple chip datasets** (C6, S3) using 64 SC (HT20 mode).
+
+Both Python and C++ tests use the same NPZ files, eliminating duplication.
 
 ---
 
@@ -55,19 +65,6 @@ Run tests with coverage instrumentation:
 ```bash
 ./run_coverage.sh
 ```
-
-### Current Coverage
-
-| File | Lines | Functions | Branches |
-|------|-------|-----------|----------|
-| `csi_manager.cpp` | 92% | 100% | 85% |
-| `csi_processor.cpp` | 89% | 100% | 81% |
-| `calibration_manager.cpp` | 74% | 100% | 65% |
-| `utils.h` | 92% | 100% | 69% |
-| `gain_controller.cpp` | 75% | 50% | - |
-| **Total** | **76%** | **75%** | **70%** |
-
-> **Note**: Coverage measured on Codecov (CI). Tests use real CSI data from ESP32-C6 captures.
 
 ---
 

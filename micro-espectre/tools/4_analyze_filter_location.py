@@ -8,8 +8,9 @@ Compares filtering at different stages:
 4. Filter amplitudes BEFORE calculating turbulence (paper-style)
 
 Usage:
-    python tools/4_analyze_filter_location.py
-    python tools/4_analyze_filter_location.py --plot
+    python tools/4_analyze_filter_location.py              # Use C6 dataset
+    python tools/4_analyze_filter_location.py --chip S3    # Use S3 dataset
+    python tools/4_analyze_filter_location.py --plot       # Show visualization
 
 Author: Francesco Pace <francesco.pace@gmail.com>
 License: GPLv3
@@ -21,12 +22,20 @@ from pathlib import Path
 import numpy as np
 import argparse
 
-from csi_utils import load_baseline_and_movement, HampelFilter, calculate_spatial_turbulence
-from config import WINDOW_SIZE, THRESHOLD, SELECTED_SUBCARRIERS
-
-# Add src to path for SegmentationContext import (append to avoid shadowing tools/config.py)
-sys.path.append(str(Path(__file__).parent.parent / 'src'))
+# Add src to path for config and segmentation import
+sys.path.insert(0, str(Path(__file__).parent.parent / 'src'))
+from config import (SEG_WINDOW_SIZE, SEG_THRESHOLD,
+                    HAMPEL_WINDOW, HAMPEL_THRESHOLD)
 from segmentation import SegmentationContext
+
+from csi_utils import load_baseline_and_movement, HampelFilter, calculate_spatial_turbulence, find_dataset, DEFAULT_SUBCARRIERS
+
+# Alias for backward compatibility
+SELECTED_SUBCARRIERS = DEFAULT_SUBCARRIERS
+
+# Alias for backward compatibility
+WINDOW_SIZE = SEG_WINDOW_SIZE
+THRESHOLD = 1.0 if SEG_THRESHOLD == "auto" else SEG_THRESHOLD
 
 
 class StreamingSegmentationWrapper:
@@ -55,6 +64,7 @@ class StreamingSegmentationWrapper:
     
     def add_turbulence(self, turbulence):
         self._context.add_turbulence(turbulence)
+        self._context.update_state()  # Must call to calculate variance and update state
         
         if self.track_data:
             self.moving_var_history.append(self._context.current_moving_variance)
@@ -81,8 +91,9 @@ def calculate_turbulence_filtered_iq(csi_packet, hampel_I, hampel_Q, subcarriers
     """Calculate turbulence from filtered I/Q values"""
     amplitudes = []
     for i, sc_idx in enumerate(subcarriers):
-        I_raw = float(csi_packet[sc_idx * 2])
-        Q_raw = float(csi_packet[sc_idx * 2 + 1])
+        # Espressif CSI format: [Imaginary, Real, ...] per subcarrier
+        Q_raw = float(csi_packet[sc_idx * 2])      # Imaginary first
+        I_raw = float(csi_packet[sc_idx * 2 + 1])  # Real second
         I_filt = hampel_I[i].filter(I_raw)
         Q_filt = hampel_Q[i].filter(Q_raw)
         amplitudes.append(np.sqrt(I_filt*I_filt + Q_filt*Q_filt))
@@ -97,8 +108,9 @@ def calculate_turbulence_filtered_amplitudes(csi_packet, hampel_amps, subcarrier
     """
     amplitudes = []
     for i, sc_idx in enumerate(subcarriers):
-        I = float(csi_packet[sc_idx * 2])
-        Q = float(csi_packet[sc_idx * 2 + 1])
+        # Espressif CSI format: [Imaginary, Real, ...] per subcarrier
+        Q = float(csi_packet[sc_idx * 2])      # Imaginary first
+        I = float(csi_packet[sc_idx * 2 + 1])  # Real second
         raw_amp = np.sqrt(I*I + Q*Q)
         # Apply Hampel to the amplitude time series for this subcarrier
         filtered_amp = hampel_amps[i].filter(raw_amp)
@@ -144,8 +156,8 @@ def run_comparison(baseline_packets, movement_packets, track_data=False):
     }
     
     # 3. Filter I/Q Raw (separate I and Q filtering)
-    hampel_I = [HampelFilter() for _ in range(num_sc)]
-    hampel_Q = [HampelFilter() for _ in range(num_sc)]
+    hampel_I = [HampelFilter(window_size=HAMPEL_WINDOW, threshold=HAMPEL_THRESHOLD) for _ in range(num_sc)]
+    hampel_Q = [HampelFilter(window_size=HAMPEL_WINDOW, threshold=HAMPEL_THRESHOLD) for _ in range(num_sc)]
     seg = StreamingSegmentation(WINDOW_SIZE, THRESHOLD, track_data)
     
     for pkt in baseline_packets:
@@ -154,8 +166,8 @@ def run_comparison(baseline_packets, movement_packets, track_data=False):
     baseline_fp = seg.motion_packets
     baseline_data = {'moving_var': np.array(seg.moving_var_history)} if track_data else None
     
-    hampel_I = [HampelFilter() for _ in range(num_sc)]
-    hampel_Q = [HampelFilter() for _ in range(num_sc)]
+    hampel_I = [HampelFilter(window_size=HAMPEL_WINDOW, threshold=HAMPEL_THRESHOLD) for _ in range(num_sc)]
+    hampel_Q = [HampelFilter(window_size=HAMPEL_WINDOW, threshold=HAMPEL_THRESHOLD) for _ in range(num_sc)]
     seg.reset()
     for pkt in movement_packets:
         turb = calculate_turbulence_filtered_iq(pkt['csi_data'], hampel_I, hampel_Q, SELECTED_SUBCARRIERS)
@@ -167,7 +179,7 @@ def run_comparison(baseline_packets, movement_packets, track_data=False):
     }
     
     # 4. Filter Amplitudes (paper-style: Hampel on amplitude time series per subcarrier)
-    hampel_amps = [HampelFilter() for _ in range(num_sc)]
+    hampel_amps = [HampelFilter(window_size=HAMPEL_WINDOW, threshold=HAMPEL_THRESHOLD) for _ in range(num_sc)]
     seg = StreamingSegmentation(WINDOW_SIZE, THRESHOLD, track_data)
     
     for pkt in baseline_packets:
@@ -176,7 +188,7 @@ def run_comparison(baseline_packets, movement_packets, track_data=False):
     baseline_fp = seg.motion_packets
     baseline_data = {'moving_var': np.array(seg.moving_var_history)} if track_data else None
     
-    hampel_amps = [HampelFilter() for _ in range(num_sc)]
+    hampel_amps = [HampelFilter(window_size=HAMPEL_WINDOW, threshold=HAMPEL_THRESHOLD) for _ in range(num_sc)]
     seg.reset()
     for pkt in movement_packets:
         turb = calculate_turbulence_filtered_amplitudes(pkt['csi_data'], hampel_amps, SELECTED_SUBCARRIERS)
@@ -195,18 +207,33 @@ def plot_comparison(results, threshold):
     import matplotlib.pyplot as plt
     
     num_results = len(results)
-    fig, axes = plt.subplots(num_results, 2, figsize=(14, 4 * num_results))
+    fig, axes = plt.subplots(num_results, 2, figsize=(20, 4 * num_results))
     fig.suptitle('Filter Location Comparison', fontsize=14, fontweight='bold')
+    
+    # Maximize window
+    try:
+        mng = plt.get_current_fig_manager()
+        if hasattr(mng, 'window'):
+            if hasattr(mng.window, 'showMaximized'):
+                mng.window.showMaximized()
+            elif hasattr(mng.window, 'state'):
+                mng.window.state('zoomed')
+        elif hasattr(mng, 'full_screen_toggle'):
+            mng.full_screen_toggle()
+    except Exception:
+        pass
     
     for i, (name, result) in enumerate(results.items()):
         if result['baseline_data'] is None:
             continue
         
-        time = np.arange(len(result['baseline_data']['moving_var'])) / 100.0
+        # Separate time axes for baseline and movement
+        time_baseline = np.arange(len(result['baseline_data']['moving_var'])) / 100.0
+        time_movement = np.arange(len(result['movement_data']['moving_var'])) / 100.0
         
         # Baseline
         ax = axes[i, 0]
-        ax.plot(time, result['baseline_data']['moving_var'], 'g-', alpha=0.7)
+        ax.plot(time_baseline, result['baseline_data']['moving_var'], 'g-', alpha=0.7)
         ax.axhline(y=threshold, color='r', linestyle='--', linewidth=2)
         ax.set_title(f'{name} - Baseline (FP: {result["fp"]})')
         ax.set_ylabel('Moving Variance')
@@ -214,7 +241,7 @@ def plot_comparison(results, threshold):
         
         # Movement
         ax = axes[i, 1]
-        ax.plot(time, result['movement_data']['moving_var'], 'b-', alpha=0.7)
+        ax.plot(time_movement, result['movement_data']['moving_var'], 'b-', alpha=0.7)
         ax.axhline(y=threshold, color='r', linestyle='--', linewidth=2)
         ax.set_title(f'{name} - Movement (TP: {result["tp"]})')
         ax.set_ylabel('Moving Variance')
@@ -230,6 +257,8 @@ def plot_comparison(results, threshold):
 
 def main():
     parser = argparse.ArgumentParser(description='Filter Location Comparison')
+    parser.add_argument('--chip', type=str, default='C6',
+                        help='Chip type to use: C6, S3, etc. (default: C6)')
     parser.add_argument('--plot', action='store_true', help='Show visualization')
     args = parser.parse_args()
     
@@ -237,8 +266,10 @@ def main():
     print("║   FILTER LOCATION COMPARISON                          ║")
     print("╚═══════════════════════════════════════════════════════╝\n")
     
+    chip = args.chip.upper()
     try:
-        baseline_data, movement_data = load_baseline_and_movement()
+        baseline_path, movement_path, chip_name = find_dataset(chip=chip)
+        baseline_data, movement_data = load_baseline_and_movement(chip=chip)
     except FileNotFoundError as e:
         print(f"❌ Error: {e}")
         return
@@ -246,6 +277,7 @@ def main():
     baseline_packets = [{'csi_data': p['csi_data']} for p in baseline_data]
     movement_packets = [{'csi_data': p['csi_data']} for p in movement_data]
     
+    print(f"Chip: {chip_name}")
     print(f"Loaded {len(baseline_packets)} baseline, {len(movement_packets)} movement packets\n")
     
     results = run_comparison(baseline_packets, movement_packets, track_data=args.plot)

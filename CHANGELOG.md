@@ -4,34 +4,109 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-## [2.4.0] - in progress
+## [2.4.0] - 2026-01-24
 
-### Features
+### Highlights
+
+- **Two detection algorithms**: Choose between MVS (default) and PCA (Principal Component Analysis)
+- **Recalibrate from Home Assistant**: New switch to trigger recalibration without reflashing
+- **Adaptive threshold by default**: No manual tuning needed - works out of the box
+
+### New Features
+
+#### Dual Detection Algorithms
+
+Two motion detection algorithms are now available:
+
+| Algorithm | Configuration |
+|-----------|---------------|
+| **MVS** (default) | `detection_algorithm: mvs` |
+| **PCA** (experimental) | `detection_algorithm: pca` |
 
 #### Calibrate Switch
 
-New Home Assistant switch entity for triggering NBVI recalibration without reflashing.
+New Home Assistant switch for triggering recalibration without reflashing:
 
-- **`switch.espectre_calibrate`**: Turn ON to start calibration, automatically turns OFF when complete
-- **State feedback**: Switch reflects real calibration state (ON during calibration, OFF when idle)
-- **Interaction blocking**: Switch ignores user input during calibration to prevent interruption
+- `switch.espectre_calibrate`: Turn ON to recalibrate, auto-turns OFF when complete
+- Useful after room layout changes or furniture moves
 
-Useful for recalibrating after room layout changes (furniture, sensor position) without needing to erase flash.
+#### Adaptive Threshold
 
-### CI/CD
+The `segmentation_threshold` parameter is now optional:
 
-#### Smoke Tests (QEMU)
+- **Default**: Adaptive threshold calculated as P95 × 1.4 during calibration
+- **Manual override**: Specify value in YAML to use fixed threshold
 
-Added automated smoke tests using QEMU emulation to catch firmware crashes early.
+### Improvements
 
-- **Supported chips**: ESP32-S3, ESP32-C3, ESP32-C6
-- **Detection**: Kernel panics, Guru Meditation errors, assertion failures, stack smashing
-- **Stack trace analysis**: Automatic `addr2line` decoding on crash for easier debugging
-- **Architecture coverage**: Both Xtensa (S3) and RISC-V (C3, C6)
+#### Dual Band Selection Algorithms
 
-New UART configurations in `examples/uart/` for boards with USB-UART bridges (CH340, CP2102, CH343) and QEMU smoke tests.
+Two automatic subcarrier selection algorithms:
 
-> Note: ESP32 original is excluded from QEMU testing as the emulator doesn't correctly emulate PHY/radio registers, causing false positive crashes.
+| Algorithm | Method | Configuration |
+|-----------|--------|---------------|
+| **NBVI** (default) | 12 non-consecutive subcarriers | `segmentation_calibration: nbvi` |
+| **P95** | 12 consecutive subcarriers | `segmentation_calibration: p95` |
+
+#### HT20-Only Mode
+
+Simplified to WiFi 4 (802.11n) HT20 mode for stable 64 subcarriers across all ESP32 variants:
+
+- Consistent performance on C3, C6, S3, and original ESP32
+- Reduced memory footprint
+
+#### Other Improvements
+
+- **Lower threshold minimum**: 0.1 (was 0.5) for high-sensitivity applications
+- **ESP32-C3 dev config**: Added `espectre-c3-dev.yaml`
+
+### Bug Fixes
+
+- **ESP32-C3 boot crash**: Fixed duplicate `register_component` calls
+- **USB Serial JTAG**: Correct ESPHome macro for detection
+- **CSI data overflow**: Limit to 128 bytes to prevent overflow
+
+### Micro-ESPectre (R&D Platform)
+
+- **SHA256 firmware verification**: New `verify` command detects outdated firmware
+- **CSI Stream Protocol v2**: Auto-detected chip type, contributor tracking
+- **Refactored calibrators**: Cleaner architecture with `p95_calibrator.py`, `nbvi_calibrator.py`, `threshold.py`
+
+### For Contributors
+
+<details>
+<summary>Architecture changes, testing, and CI/CD improvements</summary>
+
+#### Architecture
+
+- New `IDetector` interface for polymorphic detection (`MVSDetector`, `PCADetector`)
+- Centralized threshold calculation in `threshold.h` / `threshold.py`
+- Legacy `csi_processor` module removed
+
+#### Multi-Chip Test Suite
+
+Tests run on ESP32-C6 and ESP32-S3 with real CSI data:
+
+| Chip | Recall | FP Rate | F1-Score |
+|------|--------|---------|----------|
+| C6 | 98.8% | 0.0% | 99.4% |
+| S3 | 99.1% | 14.3% | 92.9% |
+
+#### CI/CD
+
+- **NPZ data loading**: C++ tests use same NPZ files as Python via [cnpy](https://github.com/rogersce/cnpy)
+- **QEMU smoke tests**: Catches crashes on S3, C3, C6 before deploy
+- **Stale bot**: Auto-close inactive issues after 30+7 days
+- **Coverage threshold**: CI fails below 80%
+
+</details>
+
+### Documentation
+
+- **Roadmap update**: Added 3D Localization in v4.x (30-50cm indoor tracking with phase-coherent antenna array)
+- Added Part 2 Medium article link to README
+- Updated bug report template with crash debug section
+- Added Home Assistant dashboard screenshot to README
 
 ---
 

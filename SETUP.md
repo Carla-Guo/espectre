@@ -40,17 +40,19 @@ Use `pio system prune --dry-run` to list them or `pio system prune` to save disk
 
 Download the example configuration for your hardware:
 
-| Platform | Configuration File | CPU | WiFi | PSRAM | Status |
-|----------|-------------------|-----|------|-------|--------|
-| **ESP32-C6** | [espectre-c6.yaml](https://raw.githubusercontent.com/francescopace/espectre/main/examples/espectre-c6.yaml) | RISC-V @ 160MHz | WiFi 6 | ❌ | ✅ Tested |
+| Platform | Configuration File | CPU | WiFi Chip | PSRAM | Status |
+|----------|-------------------|-----|-----------|-------|--------|
+| **ESP32-C6** | [espectre-c6.yaml](https://raw.githubusercontent.com/francescopace/espectre/main/examples/espectre-c6.yaml) | RISC-V @ 160MHz | WiFi 6 capable | ❌ | ✅ Tested |
 | **ESP32-S3** | [espectre-s3.yaml](https://raw.githubusercontent.com/francescopace/espectre/main/examples/espectre-s3.yaml) | Xtensa @ 240MHz | WiFi 4 | ✅ 8MB | ✅ Tested |
 | **ESP32-C3** | [espectre-c3.yaml](https://raw.githubusercontent.com/francescopace/espectre/main/examples/espectre-c3.yaml) | RISC-V @ 160MHz | WiFi 4 | ❌ | ✅ Tested ² |
 | **ESP32** | [espectre-esp32.yaml](https://raw.githubusercontent.com/francescopace/espectre/main/examples/espectre-esp32.yaml) | Xtensa @ 240MHz | WiFi 4 | Optional | ✅ Tested ³ |
-| **ESP32-C5** | [espectre-c5.yaml](https://raw.githubusercontent.com/francescopace/espectre/main/examples/espectre-c5.yaml) | RISC-V @ 240MHz | WiFi 6 | ❌ | ⚠️ Experimental ¹ |
+| **ESP32-C5** | [espectre-c5.yaml](https://raw.githubusercontent.com/francescopace/espectre/main/examples/espectre-c5.yaml) | RISC-V @ 240MHz | WiFi 6 capable | ❌ | ⚠️ Experimental ¹ |
 | **ESP32-S2** | [espectre-s2.yaml](https://raw.githubusercontent.com/francescopace/espectre/main/examples/espectre-s2.yaml) | Xtensa @ 240MHz | WiFi 4 | Optional | ⚠️ Experimental |
 
+> **Note**: ESPectre uses WiFi 4 (802.11b/g/n) mode for stable 64 subcarriers and faster calibration, even on WiFi 6 capable chips (C5, C6). This ensures consistent performance across all platforms.
+
 **Recommendations**:
-- **ESP32-C6**: Best for WiFi 6 environments, standard motion detection
+- **ESP32-C6**: Modern RISC-V platform, good performance, compact form factor
 - **ESP32-S3**: Best for advanced applications, future ML features (more memory)
 - **ESP32-C3**: Budget-friendly option, compact form factor
 
@@ -62,7 +64,7 @@ These files are pre-configured to download the component automatically from GitH
 >
 > ² ESP32-C3 Super Mini: Set `traffic_generator_rate` to 94 or less. Higher values cause calibration issues (tested on multiple boards). Some cheap clones may require DIO flash mode instead of QIO.
 >
-> ³ ESP32 (original/WROOM-32): AGC/FFT gain lock is not available on this platform. NBVI calibration works but CSI amplitudes may have more variance than newer chips.
+> ³ ESP32 (original/WROOM-32): AGC/FFT gain lock is not available on this platform. Band calibration works but CSI amplitudes may have more variance than newer chips.
 >
 > ⁴ **Boards with USB-UART bridges** (CH340, CP2102, CH343): If you don't see logs after flashing, use the UART configurations in [`examples/uart/`](https://github.com/francescopace/espectre/tree/main/examples/uart) which enable logging on UART0.
 
@@ -181,6 +183,8 @@ All parameters can be adjusted in the YAML file under the `espectre:` section:
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
+| `detection_algorithm` | string | mvs | Detection algorithm: `mvs` (Moving Variance) or `pca` (Principal Component Analysis) |
+| `segmentation_calibration` | string | nbvi | Band selection: `nbvi` (spectral diversity) or `p95` (contiguous band). Only used with MVS, ignored by PCA. |
 | `traffic_generator_rate` | int | 100 | Packets/sec for CSI generation (0=disabled, use external traffic) |
 | `traffic_generator_mode` | string | dns | Traffic generator mode: `dns` (UDP queries) or `ping` (ICMP) |
 | `publish_interval` | int | auto | Packets between sensor updates (default: same as traffic_generator_rate, or 100 if traffic is 0) |
@@ -195,6 +199,39 @@ All parameters can be adjusted in the YAML file under the `espectre:` section:
 | `gain_lock` | string | auto | AGC/FFT gain lock: `auto`, `enabled`, `disabled` |
 
 For detailed parameter tuning (ranges, recommended values, troubleshooting), see [TUNING.md](TUNING.md).
+
+### Choosing Calibration Algorithm
+
+The calibration algorithm selects which subcarriers to monitor. Only used with MVS (PCA uses its own fixed selection).
+
+| Algorithm | Selection Method | Pros | Cons | Best For |
+|-----------|-----------------|------|------|----------|
+| **NBVI** (default) | 12 best non-consecutive subcarriers | Spectral diversity, resilient to narrowband interference | Slightly more complex | Default choice, environments with potential interference |
+| **P95** | 12 consecutive subcarriers with lowest P95 variance | Simple, consistent band | All eggs in one basket | Clean RF environments, debugging |
+
+**Recommendation:** Use NBVI (default). Both achieve similar detection accuracy (~95% recall, <1% FP rate), but NBVI is more resilient to narrowband interference.
+
+```yaml
+espectre:
+  segmentation_calibration: nbvi  # default, recommended
+  # segmentation_calibration: p95  # simpler, contiguous band
+```
+
+### Choosing Detection Algorithm
+
+| Algorithm | How It Works | Pros | Cons | Best For |
+|-----------|--------------|------|------|----------|
+| **MVS** (default) | Variance of spatial turbulence | Low CPU, fast response, works well in most environments | Requires band calibration | General use, battery-powered devices |
+| **PCA** | PCA + correlation with baseline | Better noise rejection | Higher CPU, slower response | Noisy RF environments, near microwave ovens |
+
+**Recommendation:** Start with MVS (default). Only switch to PCA if you experience frequent false positives that persist after tuning threshold and filters.
+
+```yaml
+espectre:
+  detection_algorithm: mvs  # default, recommended
+  # detection_algorithm: pca
+```
+
 ### Integrated Sensors (Created Automatically)
 
 All sensors are created automatically when the `espectre` component is configured. You can optionally customize their names.
@@ -204,7 +241,7 @@ All sensors are created automatically when the `espectre` component is configure
 | `movement_sensor` | sensor | "Movement Score" | Current motion intensity value |
 | `motion_sensor` | binary_sensor | "Motion Detected" | Motion state (on/off) |
 | `threshold_number` | number | "Threshold" | Detection threshold (adjustable from HA) |
-| `calibrate_switch` | switch | "Calibrate" | Trigger NBVI recalibration (ON during calibration) |
+| `calibrate_switch` | switch | "Calibrate" | Trigger band recalibration (ON during calibration) |
 
 ### Customizing Sensors
 
@@ -463,6 +500,10 @@ python3 espectre_traffic_generator.py stop     # Stop daemon
 python3 espectre_traffic_generator.py status   # Check if running
 ```
 
+**Home Assistant (Docker) note:**
+
+The script starts the background process using `subprocess.Popen` (no `fork()`), which avoids the deprecation warning emitted by Python in multi-threaded Home Assistant environments.
+
 Run on any device on the network: Raspberry Pi, NAS, Home Assistant server, etc.
 
 **Home Assistant integration:**
@@ -536,15 +577,14 @@ High airtime (>30-50%) causes network congestion, increased latency, and packet 
 
 ---
 
-## NBVI Auto-Calibration
+## Auto-Calibration
 
 > ⚠️ **CRITICAL**: The room must be **still** during the first 10 seconds after boot. Movement during calibration will result in poor detection accuracy!
 
 ESPectre automatically calibrates in two phases:
 
 1. **Gain Lock** (~3 seconds, 300 packets): Stabilizes AGC/FFT for consistent amplitudes
-2. **NBVI Calibration** (~7 seconds, 700 packets): Selects optimal 12 subcarriers
-3. Saves configuration (persists across reboots)
+2. **P95 Band Calibration** (~7 seconds, 700 packets): Selects optimal 12-subcarrier band and calculates adaptive threshold
 
 Room must be quiet during the entire ~10 second calibration.
 
@@ -587,9 +627,6 @@ esp32:
     type: esp-idf
     version: 5.5.1
     sdkconfig_options:
-      # WiFi 6 (optional - C5, C6 only)
-      CONFIG_ESP_WIFI_11AX_SUPPORT: y
-      
       # CPU frequency (platform-dependent)
       CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ: "160"  # 160 for C6, 240 for S3
       
@@ -620,17 +657,17 @@ The ESPectre component adds only **~70KB of Flash** and less than **100 bytes of
 ESPectre includes a custom partition table (`partitions.csv`) that is automatically applied during compilation. This partition table:
 
 - Supports **OTA updates** (dual app partitions)
-- Includes **SPIFFS** for calibration buffer (192KB, used during boot only)
-- App partition size: **~1.87MB** per slot
+- Includes **SPIFFS** for calibration buffer (320KB, used during boot only)
+- App partition size: **~1.8MB** per slot
 
 ```
 # ESPectre Partition Table (4MB flash)
 # Name,   Type, SubType, Offset,   Size
 nvs,      data, nvs,     0x9000,   0x5000
 otadata,  data, ota,     0xe000,   0x2000
-app0,     app,  ota_0,   0x10000,  0x1E0000   # ~1.87MB
-app1,     app,  ota_1,   0x1F0000, 0x1E0000   # ~1.87MB
-spiffs,   data, spiffs,  0x3D0000, 0x30000    # 192KB
+app0,     app,  ota_0,   0x10000,  0x1D0000   # ~1.8MB
+app1,     app,  ota_1,   0x1E0000, 0x1D0000   # ~1.8MB
+spiffs,   data, spiffs,  0x3B0000, 0x50000    # 320KB
 ```
 
 ### Combining with Other Components
@@ -680,7 +717,7 @@ spiffs,   data, spiffs,  0x7D0000, 0x30000,
 
 1. **Verify traffic generator is enabled** (`traffic_generator_rate > 0`)
 2. Check WiFi is connected (look for IP address in logs)
-3. Wait for NBVI calibration to complete (~10 seconds after boot)
+3. Wait for band calibration to complete (~10 seconds after boot)
 4. Adjust `segmentation_threshold` (try 0.5-2.0 for more sensitivity)
 
 ### False positives
@@ -695,7 +732,7 @@ spiffs,   data, spiffs,  0x7D0000, 0x30000,
 2. Check traffic generator is running
 3. Verify WiFi connection is stable
 
-**Note:** If NBVI subcarrier selection fails, the system automatically falls back to default subcarriers [11-22] while still applying baseline normalization. Motion detection will work but may be less optimal. Look for the log message `⚠ Fallback calibration: default subcarriers with normalization`.
+**Note:** If band selection fails, the system automatically falls back to default subcarriers [11-22] with a default threshold of 1.0. Motion detection will work but may be less optimal. Look for the log message `⚠ Fallback calibration: using default subcarriers`.
 
 ### SPIFFS partition not found
 

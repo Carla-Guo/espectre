@@ -16,23 +16,23 @@ from src.mqtt.commands import MQTTCommands
 class MQTTHandler:
     """MQTT handler with publishing and command support"""
     
-    def __init__(self, config, segmentation, wlan, traffic_generator=None, nbvi_calibration_func=None, global_state=None):
+    def __init__(self, config, detector, wlan, traffic_generator=None, band_calibration_func=None, global_state=None):
         """
         Initialize MQTT handler
         
         Args:
             config: Configuration module
-            segmentation: SegmentationContext instance
+            detector: IDetector instance (MVSDetector or PCADetector)
             wlan: WLAN instance
             traffic_generator: TrafficGenerator instance (optional)
-            nbvi_calibration_func: Function to run NBVI calibration (optional)
+            band_calibration_func: Function to run band calibration (optional)
             global_state: GlobalState instance for accessing loop metrics (optional)
         """
         self.config = config
-        self.seg = segmentation
+        self.detector = detector
         self.wlan = wlan
         self.traffic_gen = traffic_generator
-        self.nbvi_calibration_func = nbvi_calibration_func
+        self.band_calibration_func = band_calibration_func
         self.global_state = global_state
         self.client = None
         self.cmd_handler = None
@@ -64,11 +64,11 @@ class MQTTHandler:
         self.cmd_handler = MQTTCommands(
             self.client,
             self.config,
-            self.seg,
+            self.detector,
             self.response_topic,
             self.wlan,
             self.traffic_gen,
-            self.nbvi_calibration_func,
+            self.band_calibration_func,
             self.global_state
         )
         

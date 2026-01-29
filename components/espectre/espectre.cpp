@@ -12,6 +12,7 @@
 #include "threshold_number.h"
 #include "calibrate_switch.h"
 #include "utils.h"
+#include "threshold.h"
 #include "esphome/core/log.h"
 #include "esphome/core/application.h"
 #include "esp_wifi.h"
@@ -27,34 +28,32 @@ void ESpectreComponent::setup() {
   // 0. Initialize WiFi for optimal CSI capture
   this->wifi_lifecycle_.init();
   
-  // 1. Initialize configuration manager (load config before initializing managers)
-  // Note: hash changed to "espectre_cfg_v6" - struct now only contains threshold
-  // All other settings come from YAML or are recalculated at boot (normalization_scale)
-  this->config_manager_.init(
-      global_preferences->make_preference<ESpectreConfig>(fnv1_hash("espectre_cfg_v6"))
-  );
-  
-  // 2. Load runtime-configurable parameters from preferences
-  // Only threshold is persisted - all other settings come from YAML or are
-  // recalculated at boot (normalization_scale is computed during NBVI calibration)
-  ESpectreConfig config;
-  if (this->config_manager_.load(config)) {
-    this->segmentation_threshold_ = config.segmentation_threshold;
+  // 1. Select and configure the motion detector based on detection_algorithm_
+  if (this->detection_algorithm_ == DetectionAlgorithm::PCA) {
+    this->detector_ = &this->pca_detector_;
+    ESP_LOGI(TAG, "Using PCA detector");
+  } else {
+    // MVS is default - configure with parameters
+    this->mvs_detector_ = MVSDetector(this->segmentation_window_size_, this->segmentation_threshold_);
+    this->mvs_detector_.configure_lowpass(this->lowpass_enabled_, this->lowpass_cutoff_);
+    this->mvs_detector_.configure_hampel(this->hampel_enabled_, this->hampel_window_, this->hampel_threshold_);
+    this->detector_ = &this->mvs_detector_;
+    ESP_LOGI(TAG, "Using MVS detector (window=%d, threshold=%.2f)", 
+             this->segmentation_window_size_, this->segmentation_threshold_);
   }
   
-  // 3. Initialize CSI processor (allocates buffer internally)
-  if (!csi_processor_init(&this->csi_processor_, 
-                          this->segmentation_window_size_, 
-                          this->segmentation_threshold_)) {
-    ESP_LOGE(TAG, "Failed to initialize CSI processor");
-    return;  // Component initialization failed
+  // 2. Initialize managers (each manager handles its own internal initialization)
+  // Select and initialize the active calibrator based on configuration
+  // PCA uses its own calibrator, MVS uses NBVI or P95
+  if (this->detection_algorithm_ == DetectionAlgorithm::PCA) {
+    this->active_calibrator_ = &this->pca_calibrator_;
+    ESP_LOGI(TAG, "Using PCA calibrator");
+  } else if (this->segmentation_calibration_ == CalibrationAlgorithm::NBVI) {
+    this->active_calibrator_ = &this->nbvi_calibrator_;
+  } else {
+    this->active_calibrator_ = &this->p95_calibrator_;
   }
-  
-  // Apply loaded normalization scale (will be recalculated during calibration if needed)
-  csi_processor_set_normalization_scale(&this->csi_processor_, this->normalization_scale_);
-  
-  // 4. Initialize managers (each manager handles its own internal initialization)
-  this->calibration_manager_.init(&this->csi_manager_);
+  this->active_calibrator_->init(&this->csi_manager_);
   this->traffic_generator_.init(this->traffic_generator_rate_, this->traffic_generator_mode_);
   this->udp_listener_.init(5555);  // UDP listener for external traffic mode
   this->serial_streamer_.init();
@@ -65,32 +64,25 @@ void ESpectreComponent::setup() {
     this->send_system_info_();
   });
   
+  // 3. Initialize CSI manager with detector
   this->csi_manager_.init(
-    &this->csi_processor_,
+    this->detector_,
     this->selected_subcarriers_,
-    this->segmentation_threshold_,
-    this->segmentation_window_size_,
-    this->publish_interval_,  // Use publish_interval (not traffic_generator_rate)
-    this->lowpass_enabled_,
-    this->lowpass_cutoff_,
-    this->hampel_enabled_,
-    this->hampel_window_,
-    this->hampel_threshold_,
+    this->publish_interval_,
     this->gain_lock_mode_
   );
   
-  // 5. Register WiFi lifecycle handlers
+  // 4. Register WiFi lifecycle handlers
   this->wifi_lifecycle_.register_handlers(
       [this]() { this->on_wifi_connected_(); },
       [this]() { this->on_wifi_disconnected_(); }
   );
   
-  ESP_LOGI(TAG, "🛜 ESPectre 👻 - initialized successfully");
+  ESP_LOGI(TAG, "ESPectre initialized successfully");
 }
 
 ESpectreComponent::~ESpectreComponent() {
-  // Cleanup CSI processor (deallocates turbulence buffer)
-  csi_processor_cleanup(&this->csi_processor_);
+  // Detector cleanup is handled by destructor of member objects
 }
 
 void ESpectreComponent::on_wifi_connected_() {
@@ -104,7 +96,6 @@ void ESpectreComponent::on_wifi_connected_() {
         if (!this->ready_to_publish_) return;
         
         // Re-publish threshold on first sensor update (HA is now connected)
-        // This fixes "unknown" state after power loss
         if (!this->threshold_republished_ && this->threshold_number_ != nullptr) {
           auto *threshold_num = static_cast<ESpectreThresholdNumber *>(this->threshold_number_);
           threshold_num->republish_state();
@@ -112,10 +103,10 @@ void ESpectreComponent::on_wifi_connected_() {
         }
         
         // Log status with progress bar and actual CSI rate
-        this->sensor_publisher_.log_status(TAG, &this->csi_processor_, state, packets_received);
+        this->sensor_publisher_.log_status(TAG, this->detector_, state, packets_received);
         
         // Publish all sensors
-        this->sensor_publisher_.publish_all(&this->csi_processor_, state);
+        this->sensor_publisher_.publish_all(this->detector_, state);
       }
     ));
     
@@ -154,10 +145,6 @@ void ESpectreComponent::on_wifi_connected_() {
   // Two-phase calibration:
   // 1. Gain Lock (~3 seconds, 300 packets) - locks AGC/FFT for stable CSI
   // 2. Baseline Calibration (~7 seconds, 700 packets) - calculates normalization scale
-  //    - If user specified subcarriers: only calculates baseline variance
-  //    - If auto (NBVI): also selects optimal subcarriers
-  // Note: calibration works with both internal and external traffic
-  // Set callback to start baseline calibration AFTER gain is locked
   this->csi_manager_.set_gain_lock_callback([this]() {
     ESP_LOGI(TAG, "Gain locked");
     this->start_calibration_();
@@ -165,7 +152,7 @@ void ESpectreComponent::on_wifi_connected_() {
   
   // Ready to publish sensors (with internal or external traffic)
   this->ready_to_publish_ = true;
-  this->threshold_republished_ = false;  // Will republish on first sensor update
+  this->threshold_republished_ = false;
 }
 
 void ESpectreComponent::on_wifi_disconnected_() {
@@ -200,30 +187,29 @@ void ESpectreComponent::set_threshold_runtime(float threshold) {
   // Update internal state
   this->segmentation_threshold_ = threshold;
   
-  // Update CSI processor
-  csi_processor_set_threshold(&this->csi_processor_, threshold);
-  
-  // Update CSI manager
+  // Update CSI manager (which updates the detector internally)
   this->csi_manager_.set_threshold(threshold);
-  
-  // Save to preferences
-  ESpectreConfig config;
-  config.segmentation_threshold = threshold;
-  this->config_manager_.save(config);
   
   // Publish to Home Assistant
   if (this->threshold_number_ != nullptr) {
     this->threshold_number_->publish_state(threshold);
   }
   
-  ESP_LOGI(TAG, "Threshold updated to %.2f (saved to flash)", threshold);
+  ESP_LOGI(TAG, "Threshold updated to %.2f (session-only, recalculated at boot)", threshold);
 }
 
 void ESpectreComponent::start_calibration_() {
+  const char* algo_name;
+  if (this->detection_algorithm_ == DetectionAlgorithm::PCA) {
+    algo_name = "PCA";
+  } else {
+    algo_name = (this->segmentation_calibration_ == CalibrationAlgorithm::NBVI) ? "NBVI" : "P95";
+  }
+  
   if (this->user_specified_subcarriers_) {
     ESP_LOGI(TAG, "Starting baseline calibration (fixed subcarriers)...");
   } else {
-    ESP_LOGI(TAG, "Starting NBVI calibration...");
+    ESP_LOGI(TAG, "Starting band calibration (%s algorithm)...", algo_name);
   }
   
   // Update switch state to ON (calibrating)
@@ -231,59 +217,86 @@ void ESpectreComponent::start_calibration_() {
     static_cast<ESpectreCalibrateSwitch *>(this->calibrate_switch_)->set_calibrating(true);
   }
   
-  // Set callback to pause traffic generator when collection is complete
-  this->calibration_manager_.set_collection_complete_callback([this]() {
+  // Determine threshold mode for calculation
+  espectre::ThresholdMode calc_mode = (this->threshold_mode_ == ThresholdMode::MIN) 
+    ? espectre::ThresholdMode::MIN 
+    : espectre::ThresholdMode::AUTO;
+  
+  if (this->threshold_mode_ == ThresholdMode::MIN) {
+    ESP_LOGW(TAG, "Threshold mode: min - maximum sensitivity, may cause false positives");
+  }
+  
+  // Common callback for all calibrators
+  bool is_pca = (this->detection_algorithm_ == DetectionAlgorithm::PCA);
+  auto calibration_callback = [this, calc_mode, is_pca](const uint8_t* band, uint8_t size, 
+                                                 const std::vector<float>& cal_values, bool success) {
+    if (success) {
+      // Only update subcarriers if auto-selected (not user-specified)
+      if (!this->user_specified_subcarriers_) {
+        memcpy(this->selected_subcarriers_, band, size);
+        this->csi_manager_.update_subcarrier_selection(band);
+      }
+    }
+    
+    // Apply adaptive threshold if calibration produced valid data
+    if (band != nullptr && !cal_values.empty()) {
+      float adaptive_threshold;
+      uint8_t percentile;
+      float factor;
+      float pxx;
+      calculate_adaptive_threshold(cal_values, calc_mode, is_pca, adaptive_threshold, percentile, factor, pxx);
+      
+      this->best_pxx_ = pxx;
+      
+      if (this->threshold_mode_ != ThresholdMode::MANUAL) {
+        this->set_threshold_runtime(adaptive_threshold);
+        if (is_pca) {
+          ESP_LOGI(TAG, "Adaptive threshold: %.4f (min_corr=%.4f)", 
+                   adaptive_threshold, pxx);
+        } else {
+          ESP_LOGI(TAG, "Adaptive threshold: %.4f (P%d=%.4f x %.1f)", 
+                   adaptive_threshold, percentile, pxx, factor);
+        }
+      } else {
+        ESP_LOGI(TAG, "Using manual threshold: %.2f (adaptive would be: %.2f)", 
+                 this->segmentation_threshold_, adaptive_threshold);
+      }
+      
+      // Clear detector buffer
+      this->csi_manager_.clear_detector_buffer();
+      this->sensor_publisher_.reset_rate_counter();
+    }
+
+    this->traffic_generator_.resume();
+    
+    if (this->calibrate_switch_ != nullptr) {
+      static_cast<ESpectreCalibrateSwitch *>(this->calibrate_switch_)->set_calibrating(false);
+    }
+    
+    ESP_LOGI(TAG, "Calibration %s", success ? "completed successfully" : "failed");
+  };
+  
+  // P95-specific initialization
+  if (this->segmentation_calibration_ == CalibrationAlgorithm::P95) {
+    this->p95_calibrator_.init_subcarrier_config();
+    this->p95_calibrator_.set_skip_subcarrier_selection(this->user_specified_subcarriers_);
+  }
+  
+  // Start calibration using the active calibrator (polymorphic)
+  this->active_calibrator_->set_collection_complete_callback([this]() {
     this->traffic_generator_.pause();
   });
   
-  // Pass flag to indicate whether to run full NBVI or just baseline calculation
-  this->calibration_manager_.set_skip_subcarrier_selection(this->user_specified_subcarriers_);
-  
-  this->calibration_manager_.start_auto_calibration(
+  this->active_calibrator_->start_calibration(
     this->selected_subcarriers_,
-    12,  // Always 12 subcarriers
-    [this](const uint8_t* band, uint8_t size, float normalization_scale, bool success) {
-      if (success) {
-        // Only update subcarriers if NBVI was used (not user-specified)
-        if (!this->user_specified_subcarriers_) {
-          memcpy(this->selected_subcarriers_, band, size);
-          this->csi_manager_.update_subcarrier_selection(band);
-        }
-      }
-      
-      // Apply normalization if calibration produced valid data
-      // band == nullptr means critical failure (e.g., SPIFFS error) - skip normalization
-      // band != nullptr means at least partial success - apply normalization
-      if (band != nullptr) {
-        this->normalization_scale_ = normalization_scale;
-        csi_processor_set_normalization_scale(&this->csi_processor_, normalization_scale);
-        
-        // Store baseline variance for status reporting
-        this->baseline_variance_ = this->calibration_manager_.get_baseline_variance();
-        
-        // Clear buffer to avoid stale calibration data causing high initial values
-        csi_processor_clear_buffer(&this->csi_processor_);
-        
-        // Reset rate counter to avoid incorrect rate on first log after calibration
-        this->sensor_publisher_.reset_rate_counter();
-      }
-
-      // Resume traffic generator after calibration completes
-      this->traffic_generator_.resume();
-      
-      // Update switch state to OFF (calibration complete)
-      if (this->calibrate_switch_ != nullptr) {
-        static_cast<ESpectreCalibrateSwitch *>(this->calibrate_switch_)->set_calibrating(false);
-      }
-      
-      ESP_LOGI(TAG, "Calibration %s", success ? "completed successfully" : "failed");
-    }
+    12,
+    calibration_callback
   );
 }
 
 void ESpectreComponent::trigger_recalibration() {
   // Check if calibration already in progress
-  if (this->calibration_manager_.is_calibrating()) {
+  if (this->is_calibrating()) {
     ESP_LOGW(TAG, "Calibration already in progress");
     return;
   }
@@ -299,14 +312,13 @@ void ESpectreComponent::trigger_recalibration() {
 }
 
 void ESpectreComponent::send_system_info_() {
-  // Send system info in parseable format for the game
-  // Format: [I][sysinfo:NNN][espectre]: KEY=VALUE
-  
-  // CONFIG_IDF_TARGET_ARCH returns e.g. "esp32c6" - we uppercase it
   ESP_LOGI(TAG, "[sysinfo] chip=" CONFIG_IDF_TARGET);
-  ESP_LOGI(TAG, "[sysinfo] threshold=%.2f", this->segmentation_threshold_);
+  const char* thr_mode = (this->threshold_mode_ == ThresholdMode::MANUAL) ? "manual" :
+                         (this->threshold_mode_ == ThresholdMode::MIN) ? "min" : "auto";
+  ESP_LOGI(TAG, "[sysinfo] threshold=%.2f (%s)", this->segmentation_threshold_, thr_mode);
   ESP_LOGI(TAG, "[sysinfo] window=%d", this->segmentation_window_size_);
-  ESP_LOGI(TAG, "[sysinfo] subcarriers=%s", this->user_specified_subcarriers_ ? "yaml" : "nbvi");
+  ESP_LOGI(TAG, "[sysinfo] detector=%s", this->detector_ ? this->detector_->get_name() : "unknown");
+  ESP_LOGI(TAG, "[sysinfo] subcarriers=%s", this->user_specified_subcarriers_ ? "yaml" : "auto");
   ESP_LOGI(TAG, "[sysinfo] lowpass=%s", this->lowpass_enabled_ ? "on" : "off");
   if (this->lowpass_enabled_) {
     ESP_LOGI(TAG, "[sysinfo] lowpass_cutoff=%.1f", this->lowpass_cutoff_);
@@ -318,7 +330,7 @@ void ESpectreComponent::send_system_info_() {
   }
   ESP_LOGI(TAG, "[sysinfo] traffic_rate=%u", this->traffic_generator_rate_);
   ESP_LOGI(TAG, "[sysinfo] publish_interval=%u", this->publish_interval_);
-  ESP_LOGI(TAG, "[sysinfo] norm_scale=%.4f", this->normalization_scale_);
+  ESP_LOGI(TAG, "[sysinfo] best_pxx=%.4f", this->best_pxx_);
   ESP_LOGI(TAG, "[sysinfo] END");
 }
 
@@ -332,10 +344,13 @@ void ESpectreComponent::dump_config() {
   ESP_LOGCONFIG(TAG, "");
   ESP_LOGCONFIG(TAG, "      Wi-Fi CSI Motion Detection System");
   ESP_LOGCONFIG(TAG, "");
+  const char* thr_mode_str = (this->threshold_mode_ == ThresholdMode::MANUAL) ? "Manual" :
+                             (this->threshold_mode_ == ThresholdMode::MIN) ? "Min (P100×1.0)" : "Auto (P95×1.4)";
   ESP_LOGCONFIG(TAG, " MOTION DETECTION");
-  ESP_LOGCONFIG(TAG, " ├─ Threshold .......... %.2f", this->segmentation_threshold_);
-  ESP_LOGCONFIG(TAG, " └─ Window ............. %d pkts", this->segmentation_window_size_);
-  ESP_LOGCONFIG(TAG, " └─ Norm. Scale ........ %.4f (attenuate if >0.25)", this->normalization_scale_);
+  ESP_LOGCONFIG(TAG, " ├─ Detector ........... %s", this->detector_ ? this->detector_->get_name() : "unknown");
+  ESP_LOGCONFIG(TAG, " ├─ Threshold .......... %.2f (%s)", this->segmentation_threshold_, thr_mode_str);
+  ESP_LOGCONFIG(TAG, " ├─ Window ............. %d pkts", this->segmentation_window_size_);
+  ESP_LOGCONFIG(TAG, " └─ Baseline Pxx ....... %.4f", this->best_pxx_);
   ESP_LOGCONFIG(TAG, "");
   ESP_LOGCONFIG(TAG, " SUBCARRIERS [%02d,%02d,%02d,%02d,%02d,%02d,%02d,%02d,%02d,%02d,%02d,%02d]",
                 this->selected_subcarriers_[0], this->selected_subcarriers_[1],
@@ -344,8 +359,14 @@ void ESpectreComponent::dump_config() {
                 this->selected_subcarriers_[6], this->selected_subcarriers_[7],
                 this->selected_subcarriers_[8], this->selected_subcarriers_[9],
                 this->selected_subcarriers_[10], this->selected_subcarriers_[11]);
+  const char* algo_str;
+  if (this->detection_algorithm_ == DetectionAlgorithm::PCA) {
+    algo_str = "PCA";
+  } else {
+    algo_str = (this->segmentation_calibration_ == CalibrationAlgorithm::NBVI) ? "NBVI" : "P95";
+  }
   ESP_LOGCONFIG(TAG, " └─ Source ............. %s", 
-                this->user_specified_subcarriers_ ? "YAML" : "Auto (NBVI)");
+                this->user_specified_subcarriers_ ? "YAML" : algo_str);
   ESP_LOGCONFIG(TAG, "");
   ESP_LOGCONFIG(TAG, " TRAFFIC GENERATOR");
   if (this->traffic_generator_rate_ > 0) {

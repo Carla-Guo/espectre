@@ -45,14 +45,21 @@
 
 ## Mathematical Approach
 
-**This project uses a pure mathematical approach** based on the **MVS (Moving Variance Segmentation)** algorithm for motion detection and **NBVI (Normalized Baseline Variability Index)** for subcarriers selection.
+**This project uses a pure mathematical approach** with two detection algorithms:
+
+| Algorithm | Method | Best For |
+|-----------|--------|----------|
+| **MVS** (default) | Moving Variance Segmentation | Most environments (~99% recall) |
+| **PCA** | Principal Component Analysis | Experimental |
+
+> **Note**: PCA is experimental. Use MVS (default) for general-purpose motion detection.
 
 - **No ML training required**: Works out-of-the-box with mathematical algorithms
 - **Real-time processing**: Low latency detection on ESP32 hardware
 - **Production-ready**: Focused on reliable motion detection for smart home
 - **R&D platform available**: [Micro-ESPectre](micro-espectre/) provides features extraction for ML research
 
-For algorithm details (MVS, NBVI, Hampel filter), see [ALGORITHMS.md](micro-espectre/ALGORITHMS.md).
+For algorithm details (MVS, PCA, NBVI/P95 Band Selection, Hampel filter), see [ALGORITHMS.md](micro-espectre/ALGORITHMS.md).
 
 ---
 
@@ -87,6 +94,9 @@ For algorithm details (MVS, NBVI, Hampel filter), see [ALGORITHMS.md](micro-espe
 
 1. **Setup & Installation**: Follow the complete guide in [SETUP.md](SETUP.md)
 2. **Tuning**: Optimize for your environment with [TUNING.md](TUNING.md)
+
+![ESPectre Home Assistant Dashboard](images/espectre-home-assistant.png)
+*Home Assistant dashboard with real-time motion detection, threshold control, and debug sensors*
 
 ---
 
@@ -167,13 +177,13 @@ ESPectre uses a focused processing pipeline for motion detection:
        ▼
 ┌─────────────┐
 │    Auto     │  Automatic subcarrier selection (once at boot)
-│ Calibration │  Selects optimal 12 subcarriers via NBVI
+│ Calibration │  Selects optimal 12 subcarriers (NBVI or P95)
 └──────┬──────┘
        │
        ▼
 ┌─────────────┐
-│Normalization│  Attenuate if baseline > 0.25 (always enabled)
-│             │  Prevents extreme motion values
+│  Adaptive   │  auto: P95×1.4 | min: P100
+│  Threshold  │  or fixed manual value
 └──────┬──────┘
        │
        ▼
@@ -226,11 +236,13 @@ Each sensor is automatically discovered by Home Assistant with:
 
 ### Automatic Subcarrier Selection
 
-ESPectre implements the **NBVI (Normalized Baseline Variability Index)** algorithm for automatic subcarrier selection, achieving near-optimal performance (F1=98.2%) with **zero manual configuration**.
+ESPectre implements **NBVI** (default) for automatic subcarrier selection, achieving near-optimal performance (F1=97%) with **zero manual configuration**. The algorithm selects 12 non-consecutive subcarriers based on stability metrics and spectral diversity.
+
+An alternative **P95** algorithm is also available, selecting 12 consecutive subcarriers that minimize P95 moving variance.
 
 > ⚠️ **IMPORTANT**: Keep the room **quiet and still** for 10 seconds after device boot. The auto-calibration runs during this time and movement will affect detection accuracy.
 
-For NBVI algorithm details, see [ALGORITHMS.md](micro-espectre/ALGORITHMS.md#nbvi-automatic-subcarrier-selection).
+For algorithm details, see [ALGORITHMS.md](micro-espectre/ALGORITHMS.md#automatic-subcarrier-selection).
 
 ---
 
@@ -322,7 +334,7 @@ CSI data represents only the properties of the transmission medium and does not 
 
 ## Technical Deep Dive
 
-For algorithm details (MVS, NBVI, Hampel filter), see [ALGORITHMS.md](micro-espectre/ALGORITHMS.md).
+For algorithm details (MVS, NBVI/P95 Band Selection, Hampel filter), see [ALGORITHMS.md](micro-espectre/ALGORITHMS.md).
 
 For performance metrics (confusion matrix, F1-score, benchmarks), see [PERFORMANCE.md](PERFORMANCE.md).
 
@@ -378,7 +390,7 @@ Micro-ESPectre gives you the fundamentals for:
 
 ## Future Evolution
 
-While ESPectre v2.x focuses on **motion detection** (MVS + NBVI), the project is exploring machine learning capabilities for advanced applications:
+While ESPectre v2.x focuses on **motion detection** (MVS + automatic subcarrier selection), the project is exploring machine learning capabilities for advanced applications:
 
 | Capability | Status | Description |
 |------------|--------|-------------|
@@ -411,7 +423,7 @@ See [ROADMAP.md](ROADMAP.md) for detailed plans, timelines, and how to contribut
 | Document | Description |
 |----------|-------------|
 | [Intro](micro-espectre/README.md) | R&D platform overview, CLI, MQTT, Web Monitor |
-| [Algorithms](micro-espectre/ALGORITHMS.md) | Scientific documentation of MVS, NBVI, Hampel filter |
+| [Algorithms](micro-espectre/ALGORITHMS.md) | Scientific documentation of MVS, NBVI/P95 Band Selection, Hampel filter |
 | [Analysis Tools](micro-espectre/tools/README.md) | CSI analysis and optimization scripts |
 | [ML Data Collection](micro-espectre/ML_DATA_COLLECTION.md) | Building labeled datasets for machine learning |
 | [References](micro-espectre/README.md#references) | Academic papers and research resources |

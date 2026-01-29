@@ -11,13 +11,13 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, List, Tuple
 
-FIRMWARE_RELEASE_URL = "https://github.com/francescopace/micropython-esp32-csi/releases/download/v1.0.0-rc3"
+FIRMWARE_RELEASE_URL = "https://github.com/francescopace/micropython-esp32-csi/releases/download/v1.0.0-rc4"
 FIRMWARE_NAME_PREFIX = "ESP32_CSI_"
 
 # SHA256 hashes for firmware verification (update when releasing new firmware)
 FIRMWARE_HASHES = {
-    'ESP32_CSI_S3.bin': 'cfd769e13cb54c24e2b9c43893d5c9356dd2670d246abfb8ebe79529c92fa5c0',
-    'ESP32_CSI_C6.bin': '183c795d1f110fff99c38e3b0a0485f9329dd6fa53c98cfe55c23b2543ffdb1d',
+    'ESP32_CSI_S3.bin': '388f77fccf69e96bec16f1a40d2f6bce51e9413a7a1a6effa8ba82820c80cee3',
+    'ESP32_CSI_C6.bin': 'b4504262e57ec3dc3e8cda9cf64c774fed38bc60954f170c4575c7eb8d92513e',
 }
 
 try:
@@ -440,12 +440,19 @@ def deploy_code(args):
             ('src/__init__.py', ':src/'),
             ('src/config.py', ':src/'),
             ('src/config_local.py', ':src/'),
-            ('src/segmentation.py', ':src/'),
-            ('src/traffic_generator.py', ':src/'),
-            ('src/nvs_storage.py', ':src/'),
+            ('src/utils.py', ':src/'),
+            ('src/threshold.py', ':src/'),
             ('src/filters.py', ':src/'),
             ('src/features.py', ':src/'),
+            ('src/segmentation.py', ':src/'),
+            ('src/detector_interface.py', ':src/'),
+            ('src/mvs_detector.py', ':src/'),
+            ('src/pca_detector.py', ':src/'),
+            ('src/calibrator_interface.py', ':src/'),
+            ('src/p95_calibrator.py', ':src/'),
             ('src/nbvi_calibrator.py', ':src/'),
+            ('src/pca_calibrator.py', ':src/'),
+            ('src/traffic_generator.py', ':src/'),
             ('src/main.py', ':src/'),
             ('src/csi_streamer.py', ':src/'),
             ('src/mqtt/__init__.py', ':src/mqtt/'),
@@ -511,16 +518,38 @@ def stream_csi(args):
     print(f"  ./me collect --label <name> --duration <sec>  {Fore.CYAN}# Collect labeled data{Style.RESET_ALL}")
     print()
     
+    process = None
     try:
         # Build the exec command
         exec_cmd = f"from src.csi_streamer import stream_csi; stream_csi('{dest_ip}', duration_sec={duration})"
-        subprocess.run(['mpremote', 'connect', port, 'exec', exec_cmd])
+        process = subprocess.Popen(['mpremote', 'connect', port, 'exec', exec_cmd])
+        process.wait()
         
     except subprocess.CalledProcessError as e:
         print(f"\n{Fore.RED}❌ Error: {e}{Style.RESET_ALL}")
         sys.exit(1)
     except KeyboardInterrupt:
-        print(f"\n{Fore.YELLOW}Streaming stopped{Style.RESET_ALL}")
+        print(f"\n{Fore.YELLOW}Streaming stopped - cleaning up ESP32...{Style.RESET_ALL}")
+        # Terminate mpremote gracefully
+        if process:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        # Send hard reset to ESP32 to fully cleanup WiFi/CSI/PHY state
+        # (soft_reset doesn't fully reset ESP-IDF WiFi driver state)
+        time.sleep(0.5)  # Wait for port to be released
+        try:
+            subprocess.run(
+                ['mpremote', 'connect', port, 'exec', 'import machine; machine.reset()'],
+                timeout=5,
+                capture_output=True
+            )
+            print(f"{Fore.GREEN}ESP32 reset completed{Style.RESET_ALL}")
+        except Exception as e:
+            # machine.reset() causes immediate reboot, so timeout/error is expected
+            print(f"{Fore.GREEN}ESP32 reset completed{Style.RESET_ALL}")
     except Exception as e:
         print(f"\n{Fore.RED}❌ Unexpected error: {e}{Style.RESET_ALL}")
         sys.exit(1)
@@ -547,12 +576,36 @@ def run_application(args):
     print(f"{Fore.YELLOW}🚀 Starting application...{Style.RESET_ALL}")
     print()
     
+    process = None
     try:
-        subprocess.run(['mpremote', 'connect', port, 'run', 'src/main.py'])
+        process = subprocess.Popen(['mpremote', 'connect', port, 'run', 'src/main.py'])
+        process.wait()
         
     except subprocess.CalledProcessError as e:
         print(f"\n{Fore.RED}❌ Error: {e}{Style.RESET_ALL}")
         sys.exit(1)
+    except KeyboardInterrupt:
+        print(f"\n{Fore.YELLOW}Application stopped - cleaning up ESP32...{Style.RESET_ALL}")
+        # Terminate mpremote gracefully
+        if process:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+        # Send hard reset to ESP32 to fully cleanup WiFi/CSI/PHY state
+        # (soft_reset doesn't fully reset ESP-IDF WiFi driver state)
+        time.sleep(0.5)  # Wait for port to be released
+        try:
+            subprocess.run(
+                ['mpremote', 'connect', port, 'exec', 'import machine; machine.reset()'],
+                timeout=5,
+                capture_output=True
+            )
+            print(f"{Fore.GREEN}ESP32 reset completed{Style.RESET_ALL}")
+        except Exception as e:
+            # machine.reset() causes immediate reboot, so timeout/error is expected
+            print(f"{Fore.GREEN}ESP32 reset completed{Style.RESET_ALL}")
     except Exception as e:
         print(f"\n{Fore.RED}❌ Unexpected error: {e}{Style.RESET_ALL}")
         sys.exit(1)
@@ -614,23 +667,16 @@ def collect_csi_data(args):
     print(f"  {Fore.CYAN}Samples:{Style.RESET_ALL}   {args.samples}")
     print(f"  {Fore.CYAN}Duration:{Style.RESET_ALL}  {args.duration}s per sample")
     print(f"  {Fore.CYAN}UDP Port:{Style.RESET_ALL}  {args.udp_port}")
-    if args.chip:
-        print(f"  {Fore.CYAN}Chip:{Style.RESET_ALL}      {args.chip}")
-    if args.subject:
-        print(f"  {Fore.CYAN}Subject:{Style.RESET_ALL}   {args.subject}")
-    if args.environment:
-        print(f"  {Fore.CYAN}Environment:{Style.RESET_ALL} {args.environment}")
     print()
-    print(f"  {Fore.YELLOW}⚠️  Make sure ESP32 is streaming: ./me stream --ip <PC_IP>{Style.RESET_ALL}")
+    print(f"  {Fore.YELLOW}Chip type auto-detected from CSI stream{Style.RESET_ALL}")
+    print(f"  {Fore.YELLOW}Make sure ESP32 is streaming: ./me stream --ip <PC_IP>{Style.RESET_ALL}")
     print()
     
-    # Create collector
+    # Create collector (chip is auto-detected from CSI packets)
     collector = CSICollector(
         label=args.label,
         port=args.udp_port,
-        subject=args.subject,
-        environment=args.environment,
-        chip=args.chip
+        contributor=args.contributor
     )
     
     try:
@@ -842,18 +888,14 @@ Examples:
                                help='Number of samples to collect (default: 1)')
     collect_parser.add_argument('--duration', '-d', type=float, default=3.0,
                                help='Duration per sample in seconds (default: 3.0)')
-    collect_parser.add_argument('--subject', '-s',
-                               help='Subject/contributor ID (optional)')
-    collect_parser.add_argument('--environment', '-e',
-                               help='Environment description (optional)')
     collect_parser.add_argument('--info', '-i', action='store_true',
                                help='Show dataset statistics')
     collect_parser.add_argument('--interactive', action='store_true',
                                help='Interactive mode (press ENTER for each sample)')
-    collect_parser.add_argument('--chip', '-c',
-                               help='Chip type for filename (e.g., c6, s3)')
     collect_parser.add_argument('--udp-port', type=int, default=5001,
                                help='UDP port for CSI reception (default: 5001)')
+    collect_parser.add_argument('--contributor', '-c',
+                               help='GitHub username of the contributor')
     
     # MQTT interactive mode arguments (when no subcommand)
     parser.add_argument("--broker", default=os.getenv("MQTT_BROKER", "homeassistant.local"),
